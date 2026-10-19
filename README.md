@@ -1,40 +1,117 @@
-# Project 1 – Cache Simulator & Memory Performance Analysis
+# Cache Simulator & Memory Performance Analysis
 
-## Idea
-A CPU is much faster than main memory, so caches keep recently used data close. This simulator reads a **trace** of memory accesses (`R 0x1a40`, `W 0x2000`, ...) and tells you how many hit/miss in a configurable L1 (and optional L2) cache. Then you run experiments and explain the results — that is the "performance analysis" the JD asks for.
+A trace-driven cache simulator written in C++, with Python scripts to generate memory traces and run experiments. It models a set-associative L1 cache with an optional L2, and reports hit/miss counts, miss rate and average memory access time (AMAT).
+
+## Background
+
+Main memory is much slower than the CPU, so a small fast memory (the cache) keeps recently used data close by. Caches work because programs show two kinds of locality:
+
+- **Temporal locality**: data used recently is likely to be used again soon.
+- **Spatial locality**: data near a recently used address is likely to be used soon.
+
+The cache stores data in blocks (here 64 bytes). A memory address is split into three parts:
+
+| Part | Meaning |
+|---|---|
+| Offset | byte position inside the block |
+| Index | which set the block must go in |
+| Tag | identifies which block currently sits in a way of that set |
+
+In the code this is `block = addr / blockSize`, `set = block % numSets`, `tag = block / numSets`. Each set has N ways (the associativity). A lookup is a hit if any way in the set has a matching tag. On a miss, one way is chosen as the victim (LRU, FIFO or random) and replaced. The cache is write-back and write-allocate: a write only marks the block dirty, and the data goes to the next level when the block is evicted.
+
+Performance is summarised by AMAT:
+
+```
+AMAT = L1 hit time + L1 miss rate x (L2 hit time + L2 miss rate x memory time)
+```
+
+All experiments use L1 hit = 1 cycle, L2 hit = 10 cycles, memory = 100 cycles.
 
 ## Files
-- `cache_sim.cpp` – the simulator (write-back, write-allocate, LRU/FIFO/random)
-- `gen_trace.py` – makes traces: sequential, strided, random, conflict, matrix-multiply (2 loop orders)
-- `experiments.py` – runs 5 experiments, prints tables, saves CSV (+ PNG plots if matplotlib is installed)
 
-## Run
+| File | Purpose |
+|---|---|
+| `cache_sim.cpp` | the simulator |
+| `gen_trace.py` | generates traces (sequential, strided, random, conflict, matrix multiply) |
+| `experiments.py` | runs the experiments below, saves CSVs (and plots if matplotlib is installed) |
+| `Makefile` | builds `cache_sim` |
+
+## Build and run
+
 ```
 make
-python3 experiments.py                       # all experiments
-python3 gen_trace.py seq t.txt && ./cache_sim t.txt --l1-size 4096 --l1-block 64 --l1-assoc 2
-./cache_sim t.txt --l2-size 65536 --l2-assoc 8   # add an L2
+python3 experiments.py
 ```
 
-## How the core works (the only 3 ideas)
-1. Address → `block = addr / blockSize`, `set = block % numSets`, `tag = block / numSets`.
-2. Look in that set's ways. Tag match = **hit**. Otherwise **miss**: evict the least-recently-used way (if dirty, write it back), fetch the new block.
-3. `AMAT = L1 hit + L1 miss rate × (L2 hit + L2 miss rate × memory)`.
+Run the simulator directly on a trace file (one access per line, `R 0x40` or `W 0x40`):
 
-## Results you should see (and why)
-| Experiment | Result | Reason |
+```
+./cache_sim trace.txt --l1-size 4096 --l1-block 64 --l1-assoc 2
+./cache_sim trace.txt --l2-size 65536 --l2-assoc 8 --policy lru
+```
+
+## Results
+
+### 1. Matrix multiply loop order (64 B blocks, 2-way, 32x32 int matrices)
+
+Both versions compute the same product. `ijk` walks down a column of B, so each access is 128 bytes from the last and lands in a different block. `ikj` walks along a row, so 16 consecutive ints share a block.
+
+| L1 size | `ijk` miss rate | `ikj` miss rate |
 |---|---|---|
-| E1 loop order | `ikj` has far fewer misses than `ijk` at small cache sizes (e.g. 2.4% vs 52% at 2 KB) | `ijk` walks down a column of B (big stride, no spatial locality); `ikj` walks along rows |
-| E2 block size | Sequential miss rate halves each time block size doubles; random stays ~91% | Bigger blocks exploit **spatial locality**; random access has none |
-| E3 associativity | 1-way and 2-way: 100% misses; 4-way: ~0% | 3 blocks fight for one set; 4 ways can hold them. (2-way + LRU on a 3-block cycle is the classic worst case) |
-| E4 L2 | AMAT drops from ~93 to ~11 cycles | L1 misses are caught by the L2 instead of paying 100 cycles to memory |
-| E5 policy | Random beats LRU/FIFO on a loop slightly bigger than the cache | LRU evicts exactly the block needed next |
+| 1 KB | 52.40% | 2.68% |
+| 2 KB | 52.40% | 2.44% |
+| 4 KB | 6.48% | 0.56% |
+| 8 KB | 4.06% | 0.35% |
+| 16 KB | 0.29% | 0.19% |
 
-## Interview questions to prepare
-- Tag/index/offset: how many bits for a 4 KB, 2-way, 64 B-block cache? (32 sets → 5 index, 6 offset)
-- Compulsory vs capacity vs conflict misses — which experiment shows each?
-- Why does GPU code care about memory coalescing? (same spatial-locality idea)
-- What would change for write-through / no-write-allocate?
+Once the cache is large enough to hold the working set, the difference mostly disappears.
 
-## Extension ideas (optional)
-Add a prefetcher (fetch next block on miss) and re-run E1; add a 3rd cache level; add a victim cache.
+### 2. Block size (4 KB, 2-way)
+
+| Block size | Sequential | Random |
+|---|---|---|
+| 8 B | 50.00% | 91.65% |
+| 16 B | 25.00% | 91.50% |
+| 32 B | 12.50% | 91.66% |
+| 64 B | 6.25% | 91.68% |
+| 128 B | 3.12% | 91.66% |
+| 256 B | 1.56% | 91.71% |
+
+Sequential access halves its miss rate each time the block doubles, since each fetch brings in more useful neighbours. Random access over 48 KB has no locality to exploit, so block size makes no difference.
+
+### 3. Associativity (4 KB cache, 3 blocks that map to the same set)
+
+| Ways | Miss rate |
+|---|---|
+| 1 | 100% |
+| 2 | 100% |
+| 4 | 0.02% |
+| 8 | 0.02% |
+
+With 1 or 2 ways the three blocks keep evicting each other (conflict misses). With LRU and a repeating cycle of 3 blocks, even 2 ways always evicts the block needed next. With 4 ways all three fit.
+
+### 4. Adding an L2 (random accesses over 48 KB, L1 = 4 KB 2-way, L2 = 64 KB 8-way)
+
+| Config | L1 miss rate | L2 miss rate | AMAT |
+|---|---|---|---|
+| L1 only | 91.68% | - | 92.68 cycles |
+| L1 + L2 | 91.68% | 0.42% | 10.55 cycles |
+
+The L1 misses just as often, but almost all of those misses are served by the L2 instead of memory.
+
+### 5. Replacement policy (looping over a 5 KB array, 4 KB 4-way cache)
+
+| Policy | Miss rate |
+|---|---|
+| LRU | 6.25% |
+| FIFO | 6.25% |
+| Random | 2.54% |
+
+When a loop is slightly larger than the cache, LRU and FIFO always evict the block that is needed next. Random replacement gets lucky often enough to keep some blocks.
+
+## Limitations
+
+- Only addresses are simulated, not data values.
+- Timing is a simple AMAT formula, not a cycle-accurate model.
+- Write-backs to L2 are counted as L2 accesses, but there is no write buffer.
+- The traces are synthetic, not taken from real programs.
