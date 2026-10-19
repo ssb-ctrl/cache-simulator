@@ -1,0 +1,4 @@
+policy,miss%
+lru,6.25
+fifo,6.25
+random,2.5433999999999997
